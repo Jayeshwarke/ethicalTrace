@@ -506,20 +506,13 @@ app.get("/api/reports/:id/notes", async (req, res) => {
   }
 });
 
-// Static file serving
-const distPath = path.resolve(__dirname, "..", "dist");
-if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath));
-  app.get("*", (req, res) => {
-    if (req.path.startsWith("/api")) {
-      return res.status(404).json({ message: "API endpoint not found" });
-    }
-    res.sendFile(path.resolve(distPath, "index.html"));
-  });
-} else {
-  app.get("*", (req, res) => {
-    res.status(500).json({ message: "Build files not found" });
-  });
-}
+// API-only routes - static files are handled by Vercel
+app.get("*", (req, res) => {
+  if (req.path.startsWith("/api")) {
+    return res.status(404).json({ message: "API endpoint not found" });
+  }
+  // This shouldn't be reached since Vercel handles static files
+  res.status(404).json({ message: "Not found" });
+});
 
 export default app;
