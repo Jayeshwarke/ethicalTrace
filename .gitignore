@@ -103,3 +103,4 @@ temp/
 # Uploads folder (if you don't want to track uploaded files)
 uploads/*
 !uploads/.gitkeep
+.vercel
