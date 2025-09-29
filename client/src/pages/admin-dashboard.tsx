@@ -13,8 +13,8 @@ import { Search } from "lucide-react";
 export default function AdminDashboard() {
   const { user, logoutMutation } = useAuth();
   const [filters, setFilters] = useState({
-    status: "",
-    category: "",
+    status: "all",
+    category: "all",
     search: "",
   });
 
@@ -26,8 +26,8 @@ export default function AdminDashboard() {
     queryKey: ["/api/cases", filters.status, filters.category, filters.search],
     queryFn: () => {
       const params = new URLSearchParams();
-      if (filters.status) params.append("status", filters.status);
-      if (filters.category) params.append("category", filters.category);
+      if (filters.status && filters.status !== "all") params.append("status", filters.status);
+      if (filters.category && filters.category !== "all") params.append("category", filters.category);
       if (filters.search) params.append("search", filters.search);
       
       return fetch(`/api/cases?${params.toString()}`, {
@@ -155,7 +155,7 @@ export default function AdminDashboard() {
                     <SelectValue placeholder="All Categories" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">All Categories</SelectItem>
+                    <SelectItem value="all">All Categories</SelectItem>
                     <SelectItem value="harassment">Harassment</SelectItem>
                     <SelectItem value="safety">Safety</SelectItem>
                     <SelectItem value="ethics">Ethics</SelectItem>
@@ -169,7 +169,7 @@ export default function AdminDashboard() {
                     <SelectValue placeholder="All Statuses" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">All Statuses</SelectItem>
+                    <SelectItem value="all">All Statuses</SelectItem>
                     <SelectItem value="new">New</SelectItem>
                     <SelectItem value="investigating">Investigating</SelectItem>
                     <SelectItem value="pending">Pending</SelectItem>

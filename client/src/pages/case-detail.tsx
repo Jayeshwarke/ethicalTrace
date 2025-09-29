@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useParams, useLocation } from "wouter";
+import { useParams, useLocation, useRoute } from "wouter";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -41,15 +41,27 @@ const categoryColors = {
 };
 
 export default function CaseDetail() {
-  const { id } = useParams<{ id: string }>();
+  const [, params] = useRoute("/admin/cases/:id");
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const { data: caseData, isLoading } = useQuery({
+  const id = params?.id;
+  
+  // Debug logging
+  console.log("CaseDetail - ID from useRoute:", id);
+  console.log("CaseDetail - params:", params);
+
+  const { data: caseData, isLoading, error } = useQuery({
     queryKey: ["/api/cases", id],
     queryFn: () => fetch(`/api/cases/${id}`, { credentials: "include" }).then(res => res.json()),
+    enabled: !!id, // Only run query when id exists
   });
+
+  // Debug logging for case data
+  console.log("CaseDetail - caseData:", caseData);
+  console.log("CaseDetail - isLoading:", isLoading);
+  console.log("CaseDetail - error:", error);
 
   const updateStatusMutation = useMutation({
     mutationFn: async (status: string) => {
@@ -168,6 +180,38 @@ export default function CaseDetail() {
           </ol>
         </nav>
 
+        {isLoading && (
+          <div className="flex items-center justify-center py-12">
+            <div className="text-center">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
+              <p className="text-muted-foreground">Loading case details...</p>
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="flex items-center justify-center py-12">
+            <div className="text-center">
+              <p className="text-destructive mb-4">Failed to load case details</p>
+              <Button onClick={() => setLocation("/admin")}>
+                Back to Dashboard
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {!isLoading && !error && !caseData && (
+          <div className="flex items-center justify-center py-12">
+            <div className="text-center">
+              <p className="text-muted-foreground mb-4">Case not found</p>
+              <Button onClick={() => setLocation("/admin")}>
+                Back to Dashboard
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {!isLoading && !error && caseData && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Case Details */}
           <div className="lg:col-span-2 space-y-6">
@@ -181,17 +225,17 @@ export default function CaseDetail() {
                     </h1>
                     <div className="flex items-center space-x-4">
                       <Badge className={(categoryColors as any)[caseData.category]} data-testid="case-category">
-                        {caseData.category.charAt(0).toUpperCase() + caseData.category.slice(1)}
+                        {caseData.category ? caseData.category.charAt(0).toUpperCase() + caseData.category.slice(1) : 'Unknown'}
                       </Badge>
                       <Badge className={(statusColors as any)[caseData.status]} data-testid="case-status">
-                        {caseData.status.charAt(0).toUpperCase() + caseData.status.slice(1)}
+                        {caseData.status ? caseData.status.charAt(0).toUpperCase() + caseData.status.slice(1) : 'Unknown'}
                       </Badge>
                     </div>
                   </div>
                   <div className="text-right">
                     <p className="text-sm text-muted-foreground">Reported</p>
                     <p className="text-sm font-medium text-foreground" data-testid="case-date">
-                      {format(new Date(caseData.createdAt), "MMMM d, yyyy")}
+                      {caseData.createdAt ? format(new Date(caseData.createdAt), "MMMM d, yyyy") : 'Unknown'}
                     </p>
                   </div>
                 </div>
@@ -236,7 +280,7 @@ export default function CaseDetail() {
                                 <span className="font-medium text-foreground">Case Created</span>
                               </div>
                               <p className="mt-0.5 text-sm text-muted-foreground">
-                                {format(new Date(caseData.createdAt), "MMMM d, yyyy 'at' h:mm a")}
+                                {caseData.createdAt ? format(new Date(caseData.createdAt), "MMMM d, yyyy 'at' h:mm a") : 'Unknown'}
                               </p>
                             </div>
                             <div className="mt-2 text-sm text-muted-foreground">
@@ -300,13 +344,13 @@ export default function CaseDetail() {
                   <div>
                     <dt className="text-sm font-medium text-muted-foreground">Category</dt>
                     <dd className="text-sm text-foreground">
-                      {caseData.category.charAt(0).toUpperCase() + caseData.category.slice(1)}
+                      {caseData.category ? caseData.category.charAt(0).toUpperCase() + caseData.category.slice(1) : 'Unknown'}
                     </dd>
                   </div>
                   <div>
                     <dt className="text-sm font-medium text-muted-foreground">Current Status</dt>
                     <dd className="text-sm text-foreground">
-                      {caseData.status.charAt(0).toUpperCase() + caseData.status.slice(1)}
+                      {caseData.status ? caseData.status.charAt(0).toUpperCase() + caseData.status.slice(1) : 'Unknown'}
                     </dd>
                   </div>
                 </dl>
@@ -321,7 +365,7 @@ export default function CaseDetail() {
               <CardContent>
                 <div className="space-y-4">
                   <Select 
-                    value={caseData.status} 
+                    value={caseData.status || "new"} 
                     onValueChange={handleStatusUpdate}
                     data-testid="select-status-update"
                   >
@@ -371,6 +415,7 @@ export default function CaseDetail() {
             </Card>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

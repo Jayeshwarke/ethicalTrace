@@ -84,8 +84,8 @@ export function registerRoutes(app: Express): Server {
   app.get("/api/cases", requireAuth, async (req, res) => {
     try {
       const filters = {
-        status: req.query.status as string,
-        category: req.query.category as string,
+        status: req.query.status === "all" ? undefined : req.query.status as string,
+        category: req.query.category === "all" ? undefined : req.query.category as string,
         search: req.query.search as string,
       };
 

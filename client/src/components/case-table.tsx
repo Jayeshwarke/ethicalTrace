@@ -113,11 +113,11 @@ export default function CaseTable({ cases, isLoading }: CaseTableProps) {
                     </Badge>
                   </TableCell>
                   <TableCell className="text-muted-foreground" data-testid={`case-date-${caseItem.id}`}>
-                    {format(new Date(caseItem.createdAt), "MMM d, yyyy")}
+                    {caseItem.createdAt ? format(new Date(caseItem.createdAt), "MMM d, yyyy") : 'Unknown'}
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center space-x-2">
-                      <Link href={`/admin/cases/${caseItem.id}`}>
+                      <Link to={`/admin/cases/${caseItem.id}`}>
                         <Button 
                           variant="ghost" 
                           size="sm"
