@@ -1,95 +1,389 @@
-import 'dotenv/config';
-import express, { type Request, Response, NextFunction } from "express";
-import { setupAuth } from "../server/auth";
-import { insertReportSchema, updateReportStatusSchema, insertCaseNoteSchema } from "@shared/schema";
-import multer from "multer";
-import path from "path";
-import fs from "fs";
-import { z } from "zod";
-import { storage } from "../server/storage";
+import express from 'express';
+import { Express } from 'express';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import { z } from 'zod';
 import { fileURLToPath } from 'url';
+import passport from "passport";
+import { Strategy as LocalStrategy } from "passport-local";
+import session from "express-session";
+import { scrypt, randomBytes, timingSafeEqual } from "crypto";
+import { promisify } from "util";
+import { Pool } from 'pg';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import * as schema from "../shared/schema.js";
+import { users, reports, caseNotes, type User, type InsertUser, type Report, type InsertReport, type CaseNote, type InsertCaseNote, type User as SelectUser } from "../shared/schema.js";
+import { eq, desc, and, ilike, count } from "drizzle-orm";
+import connectPg from "connect-pg-simple";
+import { Store } from "express-session";
 
-// Fix for __dirname in ES modules
+// ES Module compatibility
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
+// Database setup
+if (!process.env.DATABASE_URL) {
+  throw new Error(
+    "DATABASE_URL must be set. Did you forget to provision a database?",
+  );
+}
 
-// Check for required environment variables
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const db = drizzle(pool, { schema });
+
+// Session store setup
+const PostgresSessionStore = connectPg(session);
+const sessionStore = new PostgresSessionStore({ 
+  pool, 
+  createTableIfMissing: true 
+});
+
+// Storage implementation
+interface IStorage {
+  getUser(id: string): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
+  getUserByEmail(email: string): Promise<User | undefined>;
+  createUser(user: InsertUser): Promise<User>;
+  
+  createReport(report: InsertReport): Promise<Report>;
+  getReports(filters?: { status?: string; category?: string; search?: string }): Promise<Report[]>;
+  getReportById(id: string): Promise<Report | undefined>;
+  getReportByTrackingId(trackingId: string): Promise<Report | undefined>;
+  updateReportStatus(id: string, status: string, assignedToId?: string): Promise<Report | undefined>;
+  getReportsStats(): Promise<{ total: number; new: number; investigating: number; resolved: number; thisMonth: number }>;
+  
+  createCaseNote(note: InsertCaseNote & { addedById: string }): Promise<CaseNote>;
+  getCaseNotesByReportId(reportId: string): Promise<(CaseNote & { addedBy: { username: string } })[]>;
+  
+  sessionStore: Store;
+}
+
+class DatabaseStorage implements IStorage {
+  sessionStore: Store;
+
+  constructor() {
+    this.sessionStore = sessionStore;
+  }
+
+  async getUser(id: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user || undefined;
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.username, username));
+    return user || undefined;
+  }
+
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.email, email));
+    return user || undefined;
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const [user] = await db
+      .insert(users)
+      .values({ ...insertUser, role: "admin" })
+      .returning();
+    return user;
+  }
+
+  async createReport(insertReport: InsertReport): Promise<Report> {
+    // Generate tracking ID
+    const timestamp = Date.now().toString().slice(-6);
+    const trackingId = `SR-2024-${timestamp}`;
+    
+    const [report] = await db
+      .insert(reports)
+      .values({ ...insertReport, trackingId })
+      .returning();
+    return report;
+  }
+
+  async getReports(filters?: { status?: string; category?: string; search?: string }): Promise<Report[]> {
+    let query = db.select().from(reports).orderBy(desc(reports.createdAt));
+    
+    if (filters) {
+      const conditions: any[] = [];
+      if (filters.status) conditions.push(eq(reports.status, filters.status as any));
+      if (filters.category) conditions.push(eq(reports.category, filters.category as any));
+      if (filters.search) {
+        conditions.push(
+          ilike(reports.description, `%${filters.search}%`)
+        );
+      }
+      if (conditions.length > 0) {
+        query = query.where(and(...conditions)) as any;
+      }
+    }
+    
+    return await query;
+  }
+
+  async getReportById(id: string): Promise<Report | undefined> {
+    const [report] = await db.select().from(reports).where(eq(reports.id, id));
+    return report || undefined;
+  }
+
+  async getReportByTrackingId(trackingId: string): Promise<Report | undefined> {
+    const [report] = await db.select().from(reports).where(eq(reports.trackingId, trackingId));
+    return report || undefined;
+  }
+
+  async updateReportStatus(id: string, status: string, assignedToId?: string): Promise<Report | undefined> {
+    const updateData: any = { 
+      status: status as any, 
+      updatedAt: new Date() 
+    };
+    
+    if (assignedToId) {
+      updateData.assignedToId = assignedToId;
+    }
+
+    const [report] = await db
+      .update(reports)
+      .set(updateData)
+      .where(eq(reports.id, id))
+      .returning();
+    return report || undefined;
+  }
+
+  async getReportsStats(): Promise<{ total: number; new: number; investigating: number; resolved: number; thisMonth: number }> {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [totalResult] = await db.select({ count: count() }).from(reports);
+    const [newResult] = await db.select({ count: count() }).from(reports).where(eq(reports.status, "new"));
+    const [investigatingResult] = await db.select({ count: count() }).from(reports).where(eq(reports.status, "investigating"));
+    const [resolvedResult] = await db.select({ count: count() }).from(reports).where(eq(reports.status, "resolved"));
+    const [thisMonthResult] = await db.select({ count: count() }).from(reports).where(
+      and(eq(reports.status, "new"), eq(reports.createdAt, startOfMonth))
+    );
+
+    return {
+      total: totalResult.count,
+      new: newResult.count,
+      investigating: investigatingResult.count,
+      resolved: resolvedResult.count,
+      thisMonth: thisMonthResult.count,
+    };
+  }
+
+  async createCaseNote(note: InsertCaseNote & { addedById: string }): Promise<CaseNote> {
+    const [caseNote] = await db
+      .insert(caseNotes)
+      .values(note)
+      .returning();
+    return caseNote;
+  }
+
+  async getCaseNotesByReportId(reportId: string): Promise<(CaseNote & { addedBy: { username: string } })[]> {
+    const notes = await db
+      .select({
+        id: caseNotes.id,
+        reportId: caseNotes.reportId,
+        note: caseNotes.note,
+        addedById: caseNotes.addedById,
+        createdAt: caseNotes.createdAt,
+        addedBy: {
+          username: users.username,
+        },
+      })
+      .from(caseNotes)
+      .innerJoin(users, eq(caseNotes.addedById, users.id))
+      .where(eq(caseNotes.reportId, reportId))
+      .orderBy(desc(caseNotes.createdAt));
+
+    return notes;
+  }
+}
+
+const storage = new DatabaseStorage();
+
+// Auth setup
+declare global {
+  namespace Express {
+    interface User extends SelectUser {}
+  }
+}
+
+const scryptAsync = promisify(scrypt);
+
+async function hashPassword(password: string) {
+  const salt = randomBytes(16).toString("hex");
+  const buf = (await scryptAsync(password, salt, 64)) as Buffer;
+  return `${buf.toString("hex")}.${salt}`;
+}
+
+async function comparePasswords(supplied: string, stored: string) {
+  const [hashed, salt] = stored.split(".");
+  const hashedBuf = Buffer.from(hashed, "hex");
+  const suppliedBuf = (await scryptAsync(supplied, salt, 64)) as Buffer;
+  return timingSafeEqual(hashedBuf, suppliedBuf);
+}
+
+function setupAuth(app: Express) {
+  const sessionSettings: session.SessionOptions = {
+    secret: process.env.SESSION_SECRET!,
+    resave: false,
+    saveUninitialized: false,
+    store: storage.sessionStore,
+  };
+
+  app.set("trust proxy", 1);
+  app.use(session(sessionSettings));
+  app.use(passport.initialize());
+  app.use(passport.session());
+
+  passport.use(
+    new LocalStrategy(async (username, password, done) => {
+      const user = await storage.getUserByUsername(username);
+      if (!user || !(await comparePasswords(password, user.password))) {
+        return done(null, false);
+      } else {
+        return done(null, user);
+      }
+    }),
+  );
+
+  passport.serializeUser((user, done) => done(null, user.id));
+  passport.deserializeUser(async (id: string, done) => {
+    const user = await storage.getUser(id);
+    done(null, user || undefined);
+  });
+
+  app.post("/api/register", async (req, res, next) => {
+    const existingUser = await storage.getUserByUsername(req.body.username);
+    if (existingUser) {
+      return res.status(400).send("Username already exists");
+    }
+
+    const user = await storage.createUser({
+      ...req.body,
+      password: await hashPassword(req.body.password),
+    });
+
+    req.login(user, (err) => {
+      if (err) return next(err);
+      res.status(201).json(user);
+    });
+  });
+
+  app.post("/api/login", passport.authenticate("local"), (req, res) => {
+    res.status(200).json(req.user);
+  });
+
+  app.post("/api/logout", (req, res, next) => {
+    req.logout((err) => {
+      if (err) return next(err);
+      res.sendStatus(200);
+    });
+  });
+
+  app.get("/api/user", (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    res.json(req.user);
+  });
+}
+
+// Express app setup
+const app = express();
+
+// Environment validation
 const requiredEnvVars = ['DATABASE_URL'];
 const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
-
 if (missingEnvVars.length > 0) {
   console.error('Missing required environment variables:', missingEnvVars);
 }
 
-// Setup authentication with error handling
-try {
-  setupAuth(app);
-} catch (error) {
-  console.error('Error setting up authentication:', error);
-}
+// Middleware - CORS setup
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', process.env.NODE_ENV === 'production' ? '*' : '*');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
 
-// Setup multer for file uploads (memory storage for serverless)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Multer configuration for file uploads
 const upload = multer({
   storage: multer.memoryStorage(), // Use memory storage for serverless
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
   fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
+    // Allow common document and image types
+    const allowedTypes = [
+      'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+      'application/pdf', 'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain'
+    ];
     
-    if (mimetype && extname) {
-      return cb(null, true);
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
     } else {
-      cb(new Error("Only images and documents are allowed"));
+      cb(null, false);
     }
   }
 });
 
-function requireAuth(req: any, res: any, next: any) {
-  if (!req.isAuthenticated()) {
-    return res.status(401).json({ message: "Authentication required" });
-  }
-  next();
-}
+// Setup authentication
+setupAuth(app);
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
-  res.json({ 
-    status: "ok", 
+  res.json({
+    status: "ok",
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// API Routes
-// Public route - submit report
-app.post("/api/reports", upload.single("file"), async (req, res) => {
+// Report submission endpoint
+app.post("/api/reports", upload.array('attachments', 5), async (req, res) => {
   try {
-    const reportData = insertReportSchema.parse({
-      ...req.body,
-      anonymous: req.body.anonymous === "true",
+    const reportSchema = z.object({
+      description: z.string().min(1, "Description is required"),
+      category: z.enum(["harassment", "safety", "ethics", "fraud", "other"]),
+      reporterName: z.string().optional(),
+      reporterEmail: z.string().email().optional(),
+      anonymous: z.boolean().optional(),
+      fileUrl: z.string().optional(),
     });
 
-    if (req.file) {
-      // For serverless, we'll store file data as base64 or handle differently
-      // For now, we'll skip file storage in serverless environment
-      console.log("File upload received but not stored in serverless environment:", req.file.originalname);
+    const validatedData = reportSchema.parse(req.body);
+    
+    // Process file attachments if any
+    const attachments: any[] = [];
+    if (req.files && Array.isArray(req.files)) {
+      for (const file of req.files) {
+        // In a real application, you'd save files to cloud storage
+        // For now, we'll just store metadata
+        attachments.push({
+          filename: file.originalname,
+          mimetype: file.mimetype,
+          size: file.size,
+          // In production, this would be a URL to the stored file
+          url: `/uploads/${file.fieldname}-${Date.now()}-${file.originalname}`
+        });
+      }
     }
 
-    // Check if storage is available
-    if (!storage) {
-      return res.status(500).json({ message: "Database not available" });
-    }
-
-    const report = await storage.createReport(reportData);
-    res.status(201).json({ 
-      trackingId: report.trackingId,
-      message: "Report submitted successfully" 
+    const report = await storage.createReport({
+      ...validatedData,
     });
+
+    res.status(201).json(report);
   } catch (error) {
     console.error("Error creating report:", error);
     if (error instanceof z.ZodError) {
@@ -100,143 +394,132 @@ app.post("/api/reports", upload.single("file"), async (req, res) => {
   }
 });
 
-// Public route - get report by tracking ID
-app.get("/api/reports/track/:trackingId", async (req, res) => {
+// Get reports endpoint
+app.get("/api/reports", async (req, res) => {
   try {
-    const report = await storage.getReportByTrackingId(req.params.trackingId);
+    const { status, category, search } = req.query;
+    
+    const filters: { status?: string; category?: string; search?: string } = {};
+    if (status && status !== 'all') filters.status = status as string;
+    if (category && category !== 'all') filters.category = category as string;
+    if (search) filters.search = search as string;
+    
+    const reports = await storage.getReports(filters);
+    res.json(reports);
+  } catch (error) {
+    console.error("Error fetching reports:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    res.status(500).json({ message: "Failed to fetch reports", error: errorMessage });
+  }
+});
+
+// Get single report endpoint
+app.get("/api/reports/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const report = await storage.getReportById(id);
+    
     if (!report) {
       return res.status(404).json({ message: "Report not found" });
     }
     
-    res.json({
-      trackingId: report.trackingId,
-      status: report.status,
-      createdAt: report.createdAt,
-    });
+    res.json(report);
   } catch (error) {
     console.error("Error fetching report:", error);
-    res.status(500).json({ message: "Failed to fetch report" });
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    res.status(500).json({ message: "Failed to fetch report", error: errorMessage });
   }
 });
 
-// Protected routes - require admin authentication
-app.get("/api/cases", requireAuth, async (req, res) => {
+// Update report status endpoint
+app.patch("/api/reports/:id/status", async (req, res) => {
   try {
-    const filters = {
-      status: req.query.status === "all" ? undefined : req.query.status as string,
-      category: req.query.category === "all" ? undefined : req.query.category as string,
-      search: req.query.search as string,
-    };
-
-    const reports = await storage.getReports(filters);
-    res.json(reports);
+    const { id } = req.params;
+    const { status, assignedToId } = req.body;
+    
+    if (!status || !["new", "investigating", "resolved", "closed"].includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+    
+    const report = await storage.updateReportStatus(id, status, assignedToId);
+    
+    if (!report) {
+      return res.status(404).json({ message: "Report not found" });
+    }
+    
+    res.json(report);
   } catch (error) {
-    console.error("Error fetching cases:", error);
-    res.status(500).json({ message: "Failed to fetch cases" });
+    console.error("Error updating report:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    res.status(500).json({ message: "Failed to update report", error: errorMessage });
   }
 });
 
-app.get("/api/cases/stats", requireAuth, async (req, res) => {
+// Get reports statistics endpoint
+app.get("/api/reports/stats", async (req, res) => {
   try {
     const stats = await storage.getReportsStats();
     res.json(stats);
   } catch (error) {
     console.error("Error fetching stats:", error);
-    res.status(500).json({ message: "Failed to fetch statistics" });
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    res.status(500).json({ message: "Failed to fetch stats", error: errorMessage });
   }
 });
 
-app.get("/api/cases/:id", requireAuth, async (req, res) => {
+// Case notes endpoints
+app.post("/api/reports/:id/notes", async (req, res) => {
   try {
-    const report = await storage.getReportById(req.params.id);
-    if (!report) {
-      return res.status(404).json({ message: "Case not found" });
-    }
-
-    const notes = await storage.getCaseNotesByReportId(req.params.id);
-    res.json({ ...report, notes });
-  } catch (error) {
-    console.error("Error fetching case:", error);
-    res.status(500).json({ message: "Failed to fetch case" });
-  }
-});
-
-app.patch("/api/cases/:id/status", requireAuth, async (req, res) => {
-  try {
-    const statusData = updateReportStatusSchema.parse(req.body);
-    const report = await storage.updateReportStatus(
-      req.params.id, 
-      statusData.status, 
-      (req as any).user?.id
-    );
+    const { id } = req.params;
+    const { note } = req.body;
     
-    if (!report) {
-      return res.status(404).json({ message: "Case not found" });
+    if (!note || typeof note !== 'string') {
+      return res.status(400).json({ message: "Note is required" });
     }
-
-    res.json(report);
-  } catch (error) {
-    console.error("Error updating status:", error);
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({ message: "Invalid status data", errors: error.errors });
-    }
-    res.status(500).json({ message: "Failed to update case status" });
-  }
-});
-
-app.post("/api/cases/:id/notes", requireAuth, async (req, res) => {
-  try {
-    const noteData = insertCaseNoteSchema.parse({
-      ...req.body,
-      reportId: req.params.id,
-    });
-
-    const note = await storage.createCaseNote({
-      ...noteData,
-      addedById: (req as any).user.id,
-    });
-
-    const noteWithUser = await storage.getCaseNotesByReportId(req.params.id);
-    const createdNote = noteWithUser.find(n => n.id === note.id);
     
-    res.status(201).json(createdNote);
+    // In a real app, you'd get the user ID from the session
+    const addedById = (req.user as any)?.id || 'system';
+    
+    const caseNote = await storage.createCaseNote({
+      reportId: id,
+      note,
+      addedById,
+    });
+    
+    res.status(201).json(caseNote);
   } catch (error) {
-    console.error("Error creating note:", error);
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({ message: "Invalid note data", errors: error.errors });
-    }
-    res.status(500).json({ message: "Failed to create note" });
+    console.error("Error creating case note:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    res.status(500).json({ message: "Failed to create case note", error: errorMessage });
   }
 });
 
-// Serve static files from dist directory
+app.get("/api/reports/:id/notes", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const notes = await storage.getCaseNotesByReportId(id);
+    res.json(notes);
+  } catch (error) {
+    console.error("Error fetching case notes:", error);
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    res.status(500).json({ message: "Failed to fetch case notes", error: errorMessage });
+  }
+});
+
+// Static file serving
 const distPath = path.resolve(__dirname, "..", "dist");
-
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
-  
-  // Serve index.html for all non-API routes (SPA routing)
   app.get("*", (req, res) => {
-    // Don't serve index.html for API routes
     if (req.path.startsWith("/api")) {
       return res.status(404).json({ message: "API endpoint not found" });
     }
-    
     res.sendFile(path.resolve(distPath, "index.html"));
   });
 } else {
-  // Fallback if dist doesn't exist
   app.get("*", (req, res) => {
     res.status(500).json({ message: "Build files not found" });
   });
 }
-
-// Error handler
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-  const status = err.status || err.statusCode || 500;
-  const message = err.message || "Internal Server Error";
-  console.error("Server error:", err);
-  res.status(status).json({ message });
-});
 
 export default app;
