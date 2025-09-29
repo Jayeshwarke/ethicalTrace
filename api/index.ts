@@ -7,17 +7,34 @@ import path from "path";
 import fs from "fs";
 import { z } from "zod";
 import { storage } from "../server/storage";
+import { fileURLToPath } from 'url';
+
+// Fix for __dirname in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// Setup authentication
-setupAuth(app);
+// Check for required environment variables
+const requiredEnvVars = ['DATABASE_URL'];
+const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
 
-// Setup multer for file uploads
+if (missingEnvVars.length > 0) {
+  console.error('Missing required environment variables:', missingEnvVars);
+}
+
+// Setup authentication with error handling
+try {
+  setupAuth(app);
+} catch (error) {
+  console.error('Error setting up authentication:', error);
+}
+
+// Setup multer for file uploads (memory storage for serverless)
 const upload = multer({
-  dest: "uploads/",
+  storage: multer.memoryStorage(), // Use memory storage for serverless
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx/;
@@ -39,6 +56,15 @@ function requireAuth(req: any, res: any, next: any) {
   next();
 }
 
+// Health check endpoint
+app.get("/api/health", (req, res) => {
+  res.json({ 
+    status: "ok", 
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
 // API Routes
 // Public route - submit report
 app.post("/api/reports", upload.single("file"), async (req, res) => {
@@ -49,7 +75,14 @@ app.post("/api/reports", upload.single("file"), async (req, res) => {
     });
 
     if (req.file) {
-      reportData.fileUrl = req.file.path;
+      // For serverless, we'll store file data as base64 or handle differently
+      // For now, we'll skip file storage in serverless environment
+      console.log("File upload received but not stored in serverless environment:", req.file.originalname);
+    }
+
+    // Check if storage is available
+    if (!storage) {
+      return res.status(500).json({ message: "Database not available" });
     }
 
     const report = await storage.createReport(reportData);
@@ -62,7 +95,7 @@ app.post("/api/reports", upload.single("file"), async (req, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ message: "Invalid report data", errors: error.errors });
     }
-    res.status(500).json({ message: "Failed to submit report" });
+    res.status(500).json({ message: "Failed to submit report", error: error.message });
   }
 });
 
