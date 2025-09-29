@@ -23,21 +23,29 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Database setup
-if (!process.env.DATABASE_URL) {
-  throw new Error(
-    "DATABASE_URL must be set. Did you forget to provision a database?",
-  );
+let pool: Pool;
+let db: any;
+let sessionStore: any;
+
+try {
+  if (!process.env.DATABASE_URL) {
+    console.error("DATABASE_URL environment variable is not set");
+    throw new Error("DATABASE_URL must be set. Did you forget to provision a database?");
+  }
+
+  pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  db = drizzle(pool, { schema });
+
+  // Session store setup
+  const PostgresSessionStore = connectPg(session);
+  sessionStore = new PostgresSessionStore({ 
+    pool, 
+    createTableIfMissing: true 
+  });
+} catch (error) {
+  console.error("Database initialization error:", error);
+  // Don't throw here, let the app start and handle errors gracefully
 }
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const db = drizzle(pool, { schema });
-
-// Session store setup
-const PostgresSessionStore = connectPg(session);
-const sessionStore = new PostgresSessionStore({ 
-  pool, 
-  createTableIfMissing: true 
-});
 
 // Storage implementation
 interface IStorage {
@@ -66,7 +74,14 @@ class DatabaseStorage implements IStorage {
     this.sessionStore = sessionStore;
   }
 
+  private checkDatabase() {
+    if (!db) {
+      throw new Error("Database not initialized");
+    }
+  }
+
   async getUser(id: string): Promise<User | undefined> {
+    this.checkDatabase();
     const [user] = await db.select().from(users).where(eq(users.id, id));
     return user || undefined;
   }
@@ -224,11 +239,16 @@ async function comparePasswords(supplied: string, stored: string) {
 }
 
 function setupAuth(app: Express) {
+  if (!process.env.SESSION_SECRET) {
+    console.error("SESSION_SECRET environment variable is not set");
+    return; // Skip auth setup if no secret
+  }
+
   const sessionSettings: session.SessionOptions = {
-    secret: process.env.SESSION_SECRET!,
+    secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
-    store: storage.sessionStore,
+    store: sessionStore || undefined,
   };
 
   app.set("trust proxy", 1);
@@ -345,7 +365,9 @@ app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    database: db ? "connected" : "not connected",
+    sessionSecret: process.env.SESSION_SECRET ? "set" : "not set"
   });
 });
 
