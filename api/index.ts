@@ -335,7 +335,7 @@ const upload = multer({
       cb(null, false);
     }
   }
-});
+}).any(); // Accept any field name
 
 // Setup authentication
 setupAuth(app);
@@ -350,7 +350,7 @@ app.get("/api/health", (req, res) => {
 });
 
 // Report submission endpoint
-app.post("/api/reports", upload.array('attachments', 5), async (req, res) => {
+app.post("/api/reports", upload, async (req, res) => {
   try {
     const reportSchema = z.object({
       description: z.string().min(1, "Description is required"),
