@@ -379,7 +379,12 @@ app.post("/api/reports", upload, async (req, res) => {
       category: z.enum(["harassment", "safety", "ethics", "fraud", "other"]),
       reporterName: z.string().optional(),
       reporterEmail: z.string().email().optional(),
-      anonymous: z.boolean().optional(),
+      anonymous: z.union([z.boolean(), z.string()]).transform((val) => {
+        if (typeof val === 'string') {
+          return val === 'true' || val === '1' || val === 'on';
+        }
+        return val;
+      }).optional(),
       fileUrl: z.string().optional(),
     });
 
