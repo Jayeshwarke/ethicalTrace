@@ -9,7 +9,7 @@
       }
     },
     {
-      "src": "client/**",
+      "src": "dist/**",
       "use": "@vercel/static"
     }
   ],
@@ -19,8 +19,12 @@
       "dest": "/server/index.ts"
     },
     {
+      "src": "/assets/(.*)",
+      "dest": "/dist/assets/$1"
+    },
+    {
       "src": "/(.*)",
-      "dest": "/client/index.html"
+      "dest": "/dist/index.html"
     }
   ],
   "env": {
