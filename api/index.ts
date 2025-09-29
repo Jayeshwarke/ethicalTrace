@@ -95,7 +95,8 @@ app.post("/api/reports", upload.single("file"), async (req, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ message: "Invalid report data", errors: error.errors });
     }
-    res.status(500).json({ message: "Failed to submit report", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    res.status(500).json({ message: "Failed to submit report", error: errorMessage });
   }
 });
 
